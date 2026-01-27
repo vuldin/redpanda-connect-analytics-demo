@@ -1,0 +1,87 @@
+# Redpanda Connect Pipeline - Data Generator
+# Generates synthetic user events and publishes to user-events-raw topic
+
+input:
+  generate:
+    interval: "100ms"
+    mapping: |
+      # Generate synthetic user event data
+      let user_id_num = random_int() % 1000
+      let user_id = "user_%04d".format($user_id_num)
+      let event_types = ["page_view", "click", "purchase", "login", "logout", "signup", "add_to_cart"]
+      let event_idx = random_int() % 7
+      let event_type = $event_types.index($event_idx)
+      let page_paths = ["/home", "/products", "/cart", "/checkout", "/profile", "/settings", "/about"]
+      let page_idx = random_int() % 7
+      let page_path = $page_paths.index($page_idx)
+      let devices = ["desktop", "mobile", "tablet"]
+      let device_idx = random_int() % 3
+      let device = $devices.index($device_idx)
+      let browsers = ["chrome", "firefox", "safari", "edge"]
+      let browser_idx = random_int() % 4
+      let browser = $browsers.index($browser_idx)
+      let countries = ["US", "UK", "CA", "DE", "FR", "JP", "AU", "BR", "IN", "MX"]
+      let country_idx = random_int() % 10
+      let country = $countries.index($country_idx)
+      
+      # Create the base event payload
+      root.event_id = uuid_v4()
+      root.user_id = $user_id
+      root.event_type = $event_type
+      root.timestamp = now().ts_unix_milli()
+      root.session_id = "session_%08x".format(random_int())
+      root.properties.page_path = $page_path
+      root.properties.device_type = $device
+      root.properties.browser = $browser
+      root.properties.country = $country
+      root.properties.duration_ms = random_int() % 30000 + 100
+      
+      # Add purchase-specific properties based on event type
+      if $event_type == "purchase" {
+        root.properties.order_id = "order_%08x".format(random_int())
+        let amount_vals = [29.99, 49.99, 99.99, 149.99, 299.99]
+        root.properties.amount = $amount_vals.index(random_int() % 5)
+        root.properties.currency = "USD"
+      }
+      
+      # Add add_to_cart-specific properties
+      if $event_type == "add_to_cart" {
+        root.properties.product_id = "prod_%05d".format(random_int() % 1000)
+        root.properties.quantity = random_int() % 5 + 1
+        let price_vals = [19.99, 39.99, 79.99, 159.99]
+        root.properties.price = $price_vals.index(random_int() % 4)
+      }
+      
+      # Add click-specific properties
+      if $event_type == "click" {
+        root.properties.element_id = "btn_%03d".format(random_int() % 50)
+        root.properties.link_url = "https://example.com" + $page_path
+      }
+
+pipeline:
+  processors:
+    - mapping: |
+        meta kafka_key = this.user_id
+        meta event_type = this.event_type
+
+output:
+  kafka:
+    addresses:
+      - redpanda:9092
+    topic: user-events-raw
+    key: ${! meta("kafka_key") }
+    compression: snappy
+
+metrics:
+  prometheus:
+    use_histogram_timing: true
+
+logger:
+  level: INFO
+  format: json
+  add_timestamp: true
+
+http:
+  enabled: true
+  address: 0.0.0.0:4195
+  root_path: /benthos

@@ -1,0 +1,132 @@
+# Redpanda Connect Pipeline - Data Processor
+# Reads from user-events-raw, enriches/processes data, writes to enriched topics
+
+input:
+  kafka:
+    addresses:
+      - redpanda:9092
+    topics:
+      - user-events-raw
+    consumer_group: processor-group
+    auto_replay_nacks: true
+    start_from_oldest: false
+
+pipeline:
+  processors:
+    # Add enrichment timestamp
+    - mapping: |
+        root = this
+        root.processed_at = now().ts_unix_milli()
+        root.processor_version = "1.0.0"
+
+    # Enrich with user tier based on user_id hash
+    - mapping: |
+        root = this
+        let user_str = this.user_id.re_replace_all("[^0-9]", "")
+        let user_num = $user_str.number()
+        let user_hash = $user_num % 100
+        root.user_tier = match $user_hash {
+          this < 5 => "vip"
+          this < 20 => "premium"
+          this < 50 => "standard"
+          _ => "free"
+        }
+
+    # Calculate engagement score based on event type
+    - mapping: |
+        root = this
+        let base_score = match this.event_type {
+          "purchase" => 100
+          "add_to_cart" => 50
+          "signup" => 80
+          "login" => 20
+          "click" => 10
+          "page_view" => 5
+          "logout" => 3
+          _ => 1
+        }
+        let tier_mult = match this.user_tier {
+          "vip" => 2.0
+          "premium" => 1.5
+          "standard" => 1.2
+          _ => 1.0
+        }
+        let duration = this.properties.duration_ms.or(0)
+        let duration_bonus = $duration / 1000
+        root.engagement_score = ($base_score * $tier_mult) + $duration_bonus
+
+    # Add geographic region mapping
+    - mapping: |
+        root = this
+        let country = this.properties.country.or("US")
+        root.properties.region = match $country {
+          "US" => "north_america"
+          "CA" => "north_america"
+          "MX" => "north_america"
+          "UK" => "europe"
+          "DE" => "europe"
+          "FR" => "europe"
+          "ES" => "europe"
+          "IT" => "europe"
+          "JP" => "asia_pacific"
+          "AU" => "asia_pacific"
+          "KR" => "asia_pacific"
+          "CN" => "asia_pacific"
+          "BR" => "south_america"
+          "AR" => "south_america"
+          "CL" => "south_america"
+          "IN" => "south_asia"
+          "PK" => "south_asia"
+          "BD" => "south_asia"
+          _ => "other"
+        }
+
+    # Detect high-value events
+    - mapping: |
+        root = this
+        let is_purchase = this.event_type == "purchase"
+        let amount = this.properties.amount.or(0)
+        let is_high_amount = $amount > 100
+        let is_vip = this.user_tier == "vip"
+        let is_premium = this.user_tier == "premium"
+        let is_vip_event = $is_vip || $is_premium
+        let is_high_engagement = this.engagement_score > 80
+        root.is_high_value = ($is_purchase && $is_high_amount) || (this.event_type == "signup") || ($is_vip_event && this.event_type == "add_to_cart") || $is_high_engagement
+
+    # Add processing metadata
+    - mapping: |
+        root = this
+        let now_ts = now().ts_unix_milli()
+        let latency = $now_ts - this.timestamp
+        root.processing_metadata = {
+          "processed_by": "redpanda-connect-processor",
+          "processing_latency_ms": $latency,
+          "pipeline_name": "user-event-enrichment"
+        }
+
+    # Set Kafka key for output partitioning
+    - mapping: |
+        meta kafka_key = this.user_id
+        meta event_type = this.event_type
+
+output:
+  kafka:
+    addresses:
+      - redpanda:9092
+    topic: user-events-enriched
+    key: ${! meta("kafka_key") }
+    compression: snappy
+
+metrics:
+  prometheus:
+    use_histogram_timing: true
+
+logger:
+  level: INFO
+  format: json
+  add_timestamp: true
+
+http:
+  enabled: true
+  address: 0.0.0.0:4195
+  root_path: /benthos

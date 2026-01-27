@@ -1,0 +1,106 @@
+version: '3.8'
+
+services:
+  # Redpanda - Kafka-compatible event streaming platform
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v25.3.6
+    container_name: redpanda
+    command:
+      - redpanda
+      - start
+      - --smp
+      - '1'
+      - --reserve-memory
+      - 0M
+      - --overprovisioned
+      - --node-id
+      - '0'
+      - --kafka-addr
+      - PLAINTEXT://0.0.0.0:9092,OUTSIDE://0.0.0.0:19092
+      - --advertise-kafka-addr
+      - PLAINTEXT://redpanda:9092,OUTSIDE://localhost:19092
+      - --rpc-addr
+      - 0.0.0.0:33145
+      - --advertise-rpc-addr
+      - redpanda:33145
+      - --schema-registry-addr
+      - internal://0.0.0.0:8081,external://0.0.0.0:18081
+      - --pandaproxy-addr
+      - internal://0.0.0.0:8082,external://0.0.0.0:18082
+      - --advertise-pandaproxy-addr
+      - internal://redpanda:8082,external://localhost:18082
+    ports:
+      - "19092:19092"      # Kafka API (external)
+      - "18081:18081"      # Schema Registry (external)
+      - "18082:18082"      # HTTP Proxy (external)
+      - "19644:9644"       # Admin API
+    volumes:
+      - redpanda-data:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD", "rpk", "cluster", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # Redpanda Console - Web UI for managing Redpanda
+  console:
+    image: docker.redpanda.com/redpandadata/console:v3.5.0
+    container_name: redpanda-console
+    environment:
+      - KAFKA_BROKERS=redpanda:9092
+      - SCHEMA_REGISTRY_ENABLED=true
+      - SCHEMA_REGISTRY_URLS=http://redpanda:8081
+    ports:
+      - "8080:8080"
+    depends_on:
+      redpanda:
+        condition: service_healthy
+
+  # Topic Setup - Creates initial topics
+  topic-setup:
+    image: docker.redpanda.com/redpandadata/redpanda:v25.3.6
+    container_name: topic-setup
+    entrypoint: ["/bin/bash", "/tmp/create-topics.sh"]
+    volumes:
+      - ./scripts/create-topics.sh:/tmp/create-topics.sh:ro
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    restart: "no"
+
+  # Redpanda Connect - Data Generator Pipeline
+  connect-generator:
+    image: docker.redpanda.com/redpandadata/connect:4.75.1
+    container_name: connect-generator
+    volumes:
+      - ./pipelines/generator.yaml:/connect.yaml:ro
+    depends_on:
+      topic-setup:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # Redpanda Connect - Data Processor Pipeline
+  connect-processor:
+    image: docker.redpanda.com/redpandadata/connect:4.75.1
+    container_name: connect-processor
+    volumes:
+      - ./pipelines/processor.yaml:/connect.yaml:ro
+    depends_on:
+      topic-setup:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # Redpanda Connect - Analytics Aggregator Pipeline
+  connect-analytics:
+    image: docker.redpanda.com/redpandadata/connect:4.75.1
+    container_name: connect-analytics
+    volumes:
+      - ./pipelines/analytics.yaml:/connect.yaml:ro
+    depends_on:
+      topic-setup:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+volumes:
+  redpanda-data:

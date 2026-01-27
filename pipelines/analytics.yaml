@@ -1,0 +1,57 @@
+# Redpanda Connect Pipeline - Analytics Aggregator
+# Reads from user-events-enriched, produces batched analytics
+
+input:
+  kafka:
+    addresses:
+      - redpanda:9092
+    topics:
+      - user-events-enriched
+    consumer_group: analytics-group
+    auto_replay_nacks: true
+    start_from_oldest: false
+
+pipeline:
+  processors:
+    # Add metadata for tracking
+    - mapping: |
+        meta event_type = this.event_type
+        meta user_tier = this.user_tier
+
+output:
+  kafka:
+    addresses:
+      - redpanda:9092
+    topic: user-analytics
+    key: ${! uuid_v4() }
+    compression: snappy
+    batching:
+      count: 50
+      period: "10s"
+      processors:
+        # Archive the batch into a JSON array
+        - archive:
+            format: json_array
+        
+        # Wrap with metadata
+        - mapping: |
+            root.batch_size = this.length()
+            root.window_start = now().ts_unix_milli() - 10000
+            root.window_end = now().ts_unix_milli()
+            root.events = this
+            root.pipeline_name = "analytics-aggregator"
+            root.analytics_timestamp = now().ts_unix_milli()
+
+metrics:
+  prometheus:
+    use_histogram_timing: true
+
+logger:
+  level: INFO
+  format: json
+  add_timestamp: true
+
+http:
+  enabled: true
+  address: 0.0.0.0:4195
+  root_path: /benthos
