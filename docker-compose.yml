@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # Redpanda - Kafka-compatible event streaming platform
   redpanda:

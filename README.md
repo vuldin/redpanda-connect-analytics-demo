@@ -1,37 +1,172 @@
-# Redpanda + Redpanda Connect Demo Project
+# Real-time user event analytics with Redpanda + Redpanda Connect
 
-A comprehensive demo showcasing **Redpanda** (Kafka-compatible event streaming platform) and **Redpanda Connect** (data streaming pipeline tool) working together with the latest versions.
+A clickstream analytics pipeline that takes raw user events, enriches them, and aggregates the results. Everything runs as YAML config on Redpanda Connect. No application code.
 
-## Overview
+## Quick start
 
-This demo creates a complete data streaming pipeline that:
+```bash
+git clone <repository-url>
+cd rpcn-demo
+docker compose up -d
+docker exec redpanda rpk cluster health
+docker exec redpanda rpk topic list
+docker exec redpanda rpk topic consume user-events-enriched --num 5
+```
 
-1. **Generates synthetic user events** (page views, clicks, purchases, etc.)
-2. **Enriches and processes** those events in real-time
-3. **Aggregates analytics** from the enriched data
-4. **Visualizes** everything through Redpanda Console
+Redpanda Console: [http://localhost:8080](http://localhost:8080)
 
-## Architecture
+## What this is for
+
+If you're building product analytics, you've dealt with this: raw clickstream data (page views, clicks, purchases) arrives fast and messy. Nobody can use it until it's been classified, scored, and aggregated. Batch ETL adds hours of delay. Writing custom stream processors means dealing with serialization, retries, scaling, and all the plumbing that has nothing to do with your actual business logic.
+
+This demo takes a different approach. Three YAML files define the entire pipeline. Redpanda stores and moves the events. Redpanda Connect does the processing. No JVM, no custom code.
+
+## What the pipeline does
+
+A product analytics platform might ingest millions of events per day. Before any of that is useful for dashboards or cohort analysis, you need to answer some questions about each event: What tier is this user? How engaged are they? What region are they in? Should this event be flagged?
+
+This pipeline answers those in real time across three stages.
+
+The generator produces synthetic clickstream at 10 events/sec: page views, purchases, signups, with device type, browser, country, and session IDs. It simulates what an SDK or collector would send in production. Events go into `user-events-raw`.
+
+The processor reads raw events and adds:
+- A user tier (vip/premium/standard/free) derived from user ID
+- An engagement score weighted by event type and tier
+- A geographic region mapped from the country code
+- A high-value flag for large purchases, signups, and VIP cart activity
+- Processing metadata with latency tracking
+
+Output goes to `user-events-enriched`.
+
+The aggregator batches enriched events in 10-second windows and writes summaries to `user-analytics`.
+
+### Architecture
 
 ```
 ┌─────────────────┐     ┌──────────────────┐     ┌──────────────────┐
-│  Data Generator │────▶│  user-events-raw │────▶│  Data Processor  │
-│   (rpcn-gen)    │     │     (topic)      │     │   (rpcn-proc)    │
+│  Data Generator │────>│  user-events-raw │────>│  Data Processor  │
+│  (rpcn-gen)     │     │     (topic)      │     │  (rpcn-proc)     │
 └─────────────────┘     └──────────────────┘     └────────┬─────────┘
-                                                         │
-                              ┌─────────────────────────┼─────────────────────────┐
-                              │                         │                         │
-                              ▼                         ▼                         ▼
-                    ┌──────────────────┐    ┌──────────────────┐    ┌──────────────────┐
-                    │user-events-enrich│    │ user-analytics   │    │ user-events-dlq  │
-                    │     (topic)      │    │    (topic)       │    │    (topic)       │
-                    └────────┬─────────┘    └──────────────────┘    └──────────────────┘
-                             │
-                             ▼
-                    ┌──────────────────┐
-                    │ Analytics Aggreg │
-                    │   (rpcn-agg)     │
-                    └──────────────────┘
+                                                          │
+                             ┌────────────────────────────┼────────────────────────────┐
+                             │                            │                            │
+                             v                            v                            v
+                   ┌──────────────────┐     ┌──────────────────┐     ┌──────────────────┐
+                   │user-events-enrich│     │  user-analytics  │     │ user-events-dlq  │
+                   │     (topic)      │     │     (topic)      │     │    (topic)       │
+                   └────────┬─────────┘     └──────────────────┘     └──────────────────┘
+                            │
+                            v
+                   ┌──────────────────┐
+                   │ Analytics Aggreg │
+                   │  (rpcn-agg)      │
+                   └──────────────────┘
+```
+
+The whole thing is three YAML files, a shell script for topic creation, and a docker-compose.yml.
+
+---
+
+## Running the demo
+
+### Prerequisites
+
+- Docker Engine 20.10+
+- Docker Compose 2.0+
+- 4GB RAM
+- Ports 8080, 19092, 18081, 18082, 19644 free
+
+### Start everything
+
+```bash
+docker compose up -d
+```
+
+This starts the Redpanda broker, Console UI, creates the topics, and launches all three pipelines.
+
+### Check that it's working
+
+```bash
+docker compose ps
+docker exec redpanda rpk cluster health
+docker exec redpanda rpk topic list
+```
+
+### Redpanda Console
+
+Open [http://localhost:8080](http://localhost:8080) to browse topics, messages, and consumer groups.
+
+## Exploring the data
+
+### Raw events
+
+```bash
+docker exec redpanda rpk topic consume user-events-raw --num 5
+
+# Follow the stream
+docker exec redpanda rpk topic consume user-events-raw
+```
+
+### Enriched events
+
+```bash
+docker exec redpanda rpk topic consume user-events-enriched --num 5
+```
+
+The processor adds these fields:
+- `processed_at` - when it was processed
+- `user_tier` - vip, premium, standard, or free
+- `engagement_score` - calculated from event type, tier, and session duration
+- `properties.region` - geographic region
+- `is_high_value` - true for large purchases, signups, VIP cart adds
+- `processing_metadata` - latency and pipeline version
+
+### Analytics
+
+```bash
+docker exec redpanda rpk topic consume user-analytics --num 3
+```
+
+Aggregates are produced every 10 seconds.
+
+### Send a test event
+
+```bash
+docker exec -it redpanda bash -c '
+echo "{\"event_id\": \"test-001\", \"user_id\": \"user_1234\", \"event_type\": \"purchase\", \"timestamp\": '$(date +%s)'000, \"session_id\": \"session_test\", \"properties\": {\"page_path\": \"/checkout\", \"device_type\": \"desktop\", \"browser\": \"chrome\", \"country\": \"US\", \"duration_ms\": 5000, \"order_id\": \"order_999\", \"amount\": 199.99, \"currency\": \"USD\"}}" | rpk topic produce user-events-raw
+'
+```
+
+## Monitoring
+
+### Pipeline health
+
+```bash
+docker exec connect-generator wget -qO- http://localhost:4195/benthos/ready
+docker exec connect-processor wget -qO- http://localhost:4195/benthos/ready
+docker exec connect-analytics wget -qO- http://localhost:4195/benthos/ready
+```
+
+### Prometheus metrics
+
+```bash
+docker exec connect-generator wget -qO- http://localhost:4195/metrics
+docker exec connect-processor wget -qO- http://localhost:4195/metrics
+```
+
+### Logs
+
+```bash
+docker logs -f connect-generator
+docker logs -f connect-processor
+docker logs -f connect-analytics
+```
+
+### Consumer groups
+
+```bash
+docker exec redpanda rpk group describe processor-group
+docker exec redpanda rpk group describe analytics-group
 ```
 
 ## Components
@@ -40,431 +175,109 @@ This demo creates a complete data streaming pipeline that:
 
 | Service | Image | Purpose |
 |---------|-------|---------|
-| Redpanda | `redpandadata/redpanda:v25.3.6` | Kafka-compatible event streaming broker |
-| Redpanda Console | `redpandadata/console:v3.5.0` | Web UI for managing topics and data |
-| Topic Setup | `redpandadata/redpanda:v25.3.6` | One-time job to create Kafka topics |
-| Connect Generator | `redpandadata/connect:4.75.1` | Generates synthetic user events |
+| Redpanda | `redpandadata/redpanda:v25.3.6` | Kafka-compatible streaming broker |
+| Redpanda Console | `redpandadata/console:v3.5.0` | Web UI for topics and messages |
+| Topic Setup | `redpandadata/redpanda:v25.3.6` | Creates topics on first run |
+| Connect Generator | `redpandadata/connect:4.75.1` | Produces synthetic events |
 | Connect Processor | `redpandadata/connect:4.75.1` | Enriches and transforms events |
-| Connect Analytics | `redpandadata/connect:4.75.1` | Aggregates analytics metrics |
+| Connect Analytics | `redpandadata/connect:4.75.1` | Aggregates into time windows |
 
 ### Topics
 
 | Topic | Partitions | Description |
 |-------|------------|-------------|
-| `user-events-raw` | 3 | Raw synthetic events generated by the generator |
-| `user-events-enriched` | 3 | Enriched events with calculated fields |
-| `user-analytics` | 3 | Aggregated analytics metrics |
-| `user-events-dlq` | 1 | Dead letter queue for failed processing |
-
-### Data Flow
-
-1. **Generator** (`pipelines/generator.yaml`)
-   - Generates 10 events per second
-   - Event types: page_view, click, purchase, login, logout, signup, add_to_cart
-   - Includes user ID, session ID, timestamp, device info, geo location
-   - Writes to `user-events-raw`
-
-2. **Processor** (`pipelines/processor.yaml`)
-   - Validates JSON schema
-   - Adds enrichment timestamp
-   - Calculates `user_tier` (vip, premium, standard, free) based on user hash
-   - Calculates `engagement_score` based on event type and user tier
-   - Adds geographic `region` mapping
-   - Flags `is_high_value` events
-   - Adds processing metadata (latency, version)
-   - Writes to `user-events-enriched`
-
-3. **Analytics** (`pipelines/analytics.yaml`)
-   - Reads from `user-events-enriched`
-   - Batches events in 10-second windows
-   - Aggregates: event counts by type, tier, region
-   - Calculates: total/avg/max engagement scores
-   - Tracks: unique users, high-value events, revenue metrics
-   - Writes to `user-analytics`
-
-## Prerequisites
-
-- Docker Engine 20.10+
-- Docker Compose 2.0+
-- At least 4GB RAM available
-- Ports 8080, 19092, 18081, 18082, 19644 must be available
-
-## Quick Start
-
-### 1. Clone and Navigate
-
-```bash
-git clone <repository-url>
-cd redpanda-connect-demo
-```
-
-### 2. Start All Services
-
-```bash
-docker compose up -d
-```
-
-This will:
-- Pull the latest Redpanda and Redpanda Connect images
-- Start Redpanda broker
-- Start Redpanda Console (Web UI)
-- Create all Kafka topics
-- Start the data generator pipeline
-- Start the data processor pipeline
-- Start the analytics aggregator pipeline
-
-### 3. Verify Everything is Running
-
-```bash
-# Check all containers are healthy
-docker compose ps
-
-# Check Redpanda cluster health
-docker exec redpanda rpk cluster health
-
-# List all topics
-docker exec redpanda rpk topic list
-```
-
-### 4. Access Redpanda Console
-
-Open your browser and navigate to:
-
-```
-http://localhost:8080
-```
-
-This provides a web interface to:
-- Browse topics and messages
-- View consumer groups
-- Monitor cluster health
-- Inspect schemas
-
-## Exploring the Data
-
-### View Raw Events
-
-```bash
-# Consume raw events (newest first)
-docker exec redpanda rpk topic consume user-events-raw --num 5
-
-# Or follow the stream
-docker exec redpanda rpk topic consume user-events-raw
-```
-
-### View Enriched Events
-
-```bash
-# Consume enriched events
-docker exec redpanda rpk topic consume user-events-enriched --num 5
-```
-
-Enriched events include additional fields:
-- `processed_at`: Timestamp when processed
-- `user_tier`: User classification (vip/premium/standard/free)
-- `engagement_score`: Calculated engagement score
-- `properties.region`: Geographic region
-- `is_high_value`: Boolean flag for high-value events
-- `processing_metadata`: Processing latency and version info
-
-### View Analytics
-
-```bash
-# Consume analytics aggregates (produced every 10 seconds)
-docker exec redpanda rpk topic consume user-analytics --num 3
-```
-
-Analytics payloads include:
-- Event counts by type, tier, region
-- Engagement score statistics
-- Unique user counts
-- Revenue metrics from purchase events
-- Top engaged users
-
-### Produce Test Message Manually
-
-```bash
-# Send a custom event
-docker exec -it redpanda bash -c '
-echo "{\"event_id\": \"test-001\", \"user_id\": \"user_1234\", \"event_type\": \"purchase\", \"timestamp\": '$(date +%s)'000, \"session_id\": \"session_test\", \"properties\": {\"page_path\": \"/checkout\", \"device_type\": \"desktop\", \"browser\": \"chrome\", \"country\": \"US\", \"duration_ms\": 5000, \"order_id\": \"order_999\", \"amount\": 199.99, \"currency\": \"USD\"}}" | rpk topic produce user-events-raw
-'
-```
-
-## Monitoring Pipelines
-
-### Check Connect Pipeline Health
-
-```bash
-# Generator pipeline health
-curl -s http://localhost:4195/benthos/ready | jq .
-
-# Processor pipeline health (needs port forwarding or container exec)
-docker exec connect-processor wget -qO- http://localhost:4195/benthos/ready
-
-# Analytics pipeline health
-docker exec connect-analytics wget -qO- http://localhost:4195/benthos/ready
-```
-
-### View Pipeline Metrics
-
-```bash
-# Get Prometheus metrics from generator
-curl -s http://localhost:4195/metrics
-
-# Get metrics from processor
-docker exec connect-processor wget -qO- http://localhost:4195/metrics
-```
-
-### View Logs
-
-```bash
-# Generator logs
-docker logs -f connect-generator
-
-# Processor logs
-docker logs -f connect-processor
-
-# Analytics logs
-docker logs -f connect-analytics
-```
-
-## Configuration Details
-
-### Generator Pipeline (`pipelines/generator.yaml`)
-
-**Input**: `generate` - Creates synthetic events every 100ms
-
-**Key Features**:
-- Random user IDs (user_0000 to user_0999)
-- Random event types with appropriate properties
-- UUID v4 for event IDs
-- Unix millisecond timestamps
-
-**Output**: `kafka` - Publishes to `user-events-raw` with user_id as key
-
-### Processor Pipeline (`pipelines/processor.yaml`)
-
-**Input**: `kafka` - Consumes from `user-events-raw`
-
-**Processors**:
-1. `json_schema` - Validates required fields
-2. `mapping` - Adds processed_at timestamp and version
-3. `mapping` - Calculates user_tier based on user_id hash
-4. `mapping` - Calculates engagement_score (0-200 range)
-5. `mapping` - Maps country to geographic region
-6. `mapping` - Determines is_high_value flag
-7. `mapping` - Adds processing metadata with latency
-
-**Output**: `kafka` - Publishes to `user-events-enriched` with user_id as key
-
-### Analytics Pipeline (`pipelines/analytics.yaml`)
-
-**Input**: `kafka` - Consumes from `user-events-enriched`
-
-**Processors**:
-1. `group_by_value` - Groups by event type
-2. `archive` + `mapping` - Batches and creates analytics summary
-
-**Batch Configuration**:
-- Count: 50 messages or 10 seconds
-
-**Output**: `kafka` - Publishes aggregated metrics to `user-analytics`
+| `user-events-raw` | 3 | Raw events from the generator |
+| `user-events-enriched` | 3 | Events after processing |
+| `user-analytics` | 3 | 10-second aggregate summaries |
+| `user-events-dlq` | 1 | Failed messages |
 
 ## Customization
 
-### Adjust Generation Rate
+### Generation rate
 
-Edit `pipelines/generator.yaml`:
+In `pipelines/generator.yaml`:
 ```yaml
 input:
   generate:
-    interval: "50ms"  # Change this (e.g., "1s" for slower, "10ms" for faster)
+    interval: "50ms"  # "1s" for slower, "10ms" for faster
 ```
 
-Then restart:
-```bash
-docker compose restart connect-generator
-```
+Then `docker compose restart connect-generator`.
 
-### Add New Event Types
+### New event types
 
-1. Edit `pipelines/generator.yaml` - Add to event_types array
-2. Edit `pipelines/processor.yaml` - Add scoring logic for new type
+1. Add the type to the array in `pipelines/generator.yaml`
+2. Add scoring logic in `pipelines/processor.yaml`
 
-### Modify Engagement Scoring
+### Engagement scoring
 
-Edit `pipelines/processor.yaml`:
+In `pipelines/processor.yaml`:
 ```yaml
 - mapping: |
     root = this
     let base_score = match this.event_type {
       "purchase" => 100
-      "your_new_event" => 75  # Add your scoring
+      "your_new_event" => 75
       # ...
     }
 ```
 
-### Change Batch Windows
+### Batch windows
 
-Edit `pipelines/analytics.yaml`:
+In `pipelines/analytics.yaml`:
 ```yaml
 output:
   kafka:
     batching:
-      count: 100      # Change batch size
-      period: "30s"   # Change time window
+      count: 100      # batch size
+      period: "30s"   # time window
 ```
 
 ## Troubleshooting
 
-### Topics Not Created
+### Topics missing
 
 ```bash
-# Re-run topic setup manually
 docker compose run --rm topic-setup
 ```
 
-### Pipeline Not Processing
+### Pipeline stuck
 
 ```bash
-# Check pipeline logs
 docker logs connect-processor
-
-# Restart pipeline
 docker compose restart connect-processor
 ```
 
-### Consumer Group Lag
+### Reset consumer offsets
 
 ```bash
-# Check consumer group status
-docker exec redpanda rpk group describe processor-group
-docker exec redpanda rpk group describe analytics-group
-```
-
-### Reset Consumer Groups
-
-```bash
-# Reset to latest offset (skip old messages)
 docker exec redpanda rpk group seek processor-group --to end
 docker exec redpanda rpk group seek analytics-group --to end
 ```
 
-### Port Conflicts
+### Port conflicts
 
-If ports are already in use, modify `docker-compose.yml` to use different host ports:
+Change the host port (left side) in `docker-compose.yml`:
 ```yaml
 ports:
-  - "29092:19092"  # Change first number to available port
-```
-
-## Advanced Usage
-
-### Scale Connect Pipelines
-
-To run multiple instances of a pipeline for higher throughput:
-
-```bash
-# Scale the processor (requires removing container_name in docker-compose.yml)
-docker compose up -d --scale connect-processor=3
-```
-
-### Export Data
-
-```bash
-# Export raw events to file
-docker exec redpanda rpk topic consume user-events-raw --format json > raw-events.json
-
-# Export with specific offset
-docker exec redpanda rpk topic consume user-events-raw --offset 0:100 --num 100
-```
-
-### Performance Testing
-
-```bash
-# Test producer throughput
-docker exec redpanda rpk topic produce user-events-raw --acks all
-
-# Benchmark
-docker exec redpanda rpk topic bench producer user-events-raw --bytes 10MiB
-```
-
-### Using rpk
-
-```bash
-# Enter Redpanda container
-docker exec -it redpanda bash
-
-# Cluster info
-rpk cluster info
-
-# Topic management
-rpk topic create my-topic --partitions 6
-rpk topic delete my-topic
-rpk topic alter-config my-topic --set retention.ms=3600000
-
-# Consumer groups
-rpk group list
-rpk group describe processor-group
-rpk group delete old-group
+  - "29092:19092"
 ```
 
 ## Cleanup
 
-### Stop All Services
-
 ```bash
 # Stop and remove containers
 docker compose down
-```
 
-### Stop and Remove Everything (Including Data)
-
-```bash
-# Stop containers and remove volumes (DELETES ALL DATA)
+# Also remove data volumes
 docker compose down -v
-
-# Remove images to free disk space
-docker compose down --rmi all
-```
-
-### Clean Up Selectively
-
-```bash
-# Stop only pipelines
-docker compose stop connect-generator connect-processor connect-analytics
-
-# Stop and remove only pipelines
-docker compose rm -s connect-generator connect-processor connect-analytics
-
-# Stop everything but keep data
-docker compose stop
-
-# Start everything again (data is preserved)
-docker compose start
-```
-
-### Full System Cleanup
-
-```bash
-# Remove all stopped containers, unused networks, dangling images
-docker system prune
-
-# Remove everything including volumes (USE WITH CAUTION)
-docker system prune -a --volumes
 ```
 
 ## Resources
 
-- [Redpanda Documentation](https://docs.redpanda.com/)
-- [Redpanda Connect Documentation](https://docs.redpanda.com/redpanda-connect/)
-- [Redpanda Connect Configuration](https://docs.redpanda.com/redpanda-connect/configuration/)
-- [Blobl Script Reference](https://docs.redpanda.com/redpanda-connect/configuration/bloblang/)
-- [Docker Hub - Redpanda](https://hub.docker.com/r/redpandadata/redpanda)
-- [Docker Hub - Redpanda Connect](https://hub.docker.com/r/redpandadata/connect)
-
-## License
-
-This demo project is provided as-is for educational purposes.
-
-Redpanda and Redpanda Connect are products of Redpanda Data Inc.
+- [Redpanda documentation](https://docs.redpanda.com/)
+- [Redpanda Connect documentation](https://docs.redpanda.com/redpanda-connect/)
+- [Redpanda Connect configuration](https://docs.redpanda.com/redpanda-connect/configuration/)
+- [Bloblang reference](https://docs.redpanda.com/redpanda-connect/configuration/bloblang/)
+- [Docker Hub: Redpanda](https://hub.docker.com/r/redpandadata/redpanda)
+- [Docker Hub: Redpanda Connect](https://hub.docker.com/r/redpandadata/connect)
