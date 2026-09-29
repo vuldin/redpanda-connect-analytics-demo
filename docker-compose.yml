@@ -100,5 +100,30 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
+  # Datadog Agent - scrapes Redpanda + Redpanda Connect Prometheus/OpenMetrics
+  # endpoints directly. Only starts with `--profile datadog`.
+  datadog-agent:
+    image: gcr.io/datadoghq/agent:7
+    container_name: datadog-agent
+    profiles:
+      - datadog
+    environment:
+      - DD_API_KEY=${DD_API_KEY}
+      - DD_SITE=${DD_SITE:-datadoghq.com}
+      - DD_HOSTNAME=rpcn-analytics-demo
+      - DD_APM_ENABLED=false
+      - DD_PROCESS_AGENT_ENABLED=false
+    volumes:
+      - ./datadog/conf.d:/etc/datadog-agent/conf.d:ro
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      connect-generator:
+        condition: service_started
+      connect-processor:
+        condition: service_started
+      connect-analytics:
+        condition: service_started
+
 volumes:
   redpanda-data:
