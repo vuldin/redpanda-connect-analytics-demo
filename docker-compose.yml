@@ -108,7 +108,7 @@ services:
     profiles:
       - datadog
     environment:
-      - DD_API_KEY=${DD_API_KEY}
+      - DD_API_KEY=${DD_API_KEY:-}
       - DD_SITE=${DD_SITE:-datadoghq.com}
       - DD_HOSTNAME=rpcn-analytics-demo
       - DD_APM_ENABLED=false

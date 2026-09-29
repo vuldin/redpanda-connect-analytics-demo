@@ -72,6 +72,7 @@ The whole thing is three YAML files, a shell script for topic creation, and a do
 - Docker Compose 2.0+
 - 4GB RAM
 - Ports 8080, 19092, 18081, 18082, 19644 free
+- `DD_API_KEY` is only needed for the optional [Datadog integration](#datadog-integration) below - the base demo doesn't use it and starts fine without setting it
 
 ### Start everything
 
