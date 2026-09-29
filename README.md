@@ -258,18 +258,18 @@ docker compose up -d --scale connect-processor=3
 
 Partitions rebalance across however many consumers are in the group, up to the partition count. Beyond that, extra consumers just sit idle - the only way to get more parallelism is to add partitions (which forfeits per-key ordering across the old and new partition layout).
 
-Within a single partition, [`checkpoint_limit`](https://docs.redpanda.com/connect/components/inputs/kafka/#checkpoint_limit) (default `1024`) caps how many in-flight, unacknowledged messages from that partition can be processed concurrently. Setting it to `1` forces strictly sequential processing per partition (useful if downstream ordering must be exact); raising it lets more messages from the same partition be processed and batched concurrently, at the cost of a larger in-flight window if the process crashes.
+By default, the [`redpanda` input](https://docs.redpanda.com/connect/components/inputs/redpanda/) processes each partition's messages strictly in order - one message goes all the way through the pipeline and output before the next one from that same partition is even fetched. That's the safe default all three pipelines use here. If you need more per-partition concurrency at the cost of strict ordering, opt into [`unordered_processing`](https://docs.redpanda.com/connect/components/inputs/redpanda/#unordered_processing-checkpoint_limit), which brings back a `checkpoint_limit`-style knob (default `1024`) capping how many in-flight, unacknowledged messages from a partition can be processed concurrently, plus its own `batching` policy.
 
 ### Partition key strategy
 
-This demo already uses two different partitioning strategies, deliberately:
+This demo already uses two different partitioning strategies on the [`redpanda` output](https://docs.redpanda.com/connect/components/outputs/redpanda/#partitioner), deliberately:
 
-- `pipelines/processor.yaml` keys `user-events-enriched` by `user_id` (`meta kafka_key = this.user_id`). Same user always lands on the same partition, so per-user event order is preserved - important if downstream logic depends on seeing one user's events in order.
-- `pipelines/analytics.yaml` keys `user-analytics` by a random `uuid_v4()`. The aggregated batches have no per-user ordering requirement, so they're spread round-robin-ish across partitions for even load instead.
+- `pipelines/processor.yaml` sets `partitioner: murmur2_hash` and keys `user-events-enriched` by `user_id` (`meta kafka_key = this.user_id`). Same user always lands on the same partition, so per-user event order is preserved - important if downstream logic depends on seeing one user's events in order. `pipelines/generator.yaml` does the same for `user-events-raw`.
+- `pipelines/analytics.yaml` sets `partitioner: round_robin` for `user-analytics`. The aggregated batches have no per-user ordering requirement, so they're spread evenly across partitions instead of being subject to key skew - the `key: uuid_v4()` is left in place mostly for message identity, not for partition selection, since `round_robin` ignores the key entirely.
 
-The risk with key-based partitioning: if traffic isn't uniform across keys (a few very active users, one noisy device ID, etc.), you get hot partitions - one partition doing most of the work while others sit idle, which caps effective throughput below what the partition count suggests. Watch per-partition throughput (`docker exec redpanda rpk topic describe user-events-enriched -p`) if you suspect skew.
+The risk with key-based (`murmur2_hash`) partitioning: if traffic isn't uniform across keys (a few very active users, one noisy device ID, etc.), you get hot partitions - one partition doing most of the work while others sit idle, which caps effective throughput below what the partition count suggests. Watch per-partition throughput (`docker exec redpanda rpk topic describe user-events-enriched -p`) if you suspect skew.
 
-If you migrate off the legacy `kafka` input/output used here to the newer [`redpanda` output](https://docs.redpanda.com/connect/components/outputs/redpanda/#partitioner), it exposes the partitioning strategy directly via `partitioner`: `murmur2_hash` (the default here, key-based), `round_robin` (even distribution, no ordering, more broker CPU), `least_backup` (routes to whichever partition has the smallest backlog - good for throughput when ordering doesn't matter), or `manual` (you pick the partition per message).
+Two other `partitioner` options exist if neither of the above fits: `least_backup` (routes to whichever partition has the smallest backlog - good for throughput when ordering doesn't matter, and adapts to skew automatically) and `manual` (you pick the partition per message).
 
 ### Observing latency
 
@@ -281,12 +281,16 @@ This demo also computes its own end-to-end latency directly in the message paylo
 docker exec redpanda rpk topic consume user-events-enriched --num 5 | grep processing_latency_ms
 ```
 
+That field alone is only visible per-message, by consuming the topic - it isn't a metric, so it can't be graphed or alerted on in Datadog. `pipelines/processor.yaml` also has a [`metric` processor](https://docs.redpanda.com/connect/components/processors/metric/) that reads the same `processing_latency_ms` value out of the message and re-emits it as a real timing metric, `pipeline_latency_ns` (converted to nanoseconds, matching RPCN's own convention). No Datadog-side changes are needed for this to show up - it's picked up automatically by the same `openmetrics` scrape of `connect-processor`'s `/metrics` endpoint already configured for the Datadog integration, appearing as `rpcn.pipeline_latency_ns`. This is deliberately named differently from RPCN's built-in `processor_latency_ns`: that one times how long the bloblang mapping stages themselves take to run (usually sub-millisecond); `pipeline_latency_ns` times the actual event-to-processing lag, which is what you'd want to alert on.
+
+This pattern - read a value out of the message, emit it with a `metric` processor - is the general way to turn any business-relevant field into something Datadog (or Prometheus) can graph, not just this specific latency value.
+
 Consumer lag (how far behind the processor/analytics groups are from the latest offsets) is a separate, complementary signal - already covered above under [Consumer groups](#consumer-groups).
 
 ### Improving latency
 
 - **Batching trades latency for throughput.** `pipelines/analytics.yaml`'s output batches up to `count: 50` or every `period: 10s`, whichever comes first - so an aggregate can sit for up to 10 seconds before it's flushed. Lower `period` (and/or `count`) for fresher aggregates at the cost of smaller, more frequent batches; raise it to amortize output overhead across more records per batch.
-- **`checkpoint_limit` interacts with batching.** If you add input-side batching, `checkpoint_limit` must be at least as large as the batch size, or batches never fill and instead flush undersized on every `period` tick.
+- **`unordered_processing.checkpoint_limit` interacts with batching.** If you enable `unordered_processing` with its own input-side batching, `checkpoint_limit` must be at least as large as the batch size, or batches never fill and instead flush undersized on every `period` tick.
 - **Scale out to shrink queueing delay.** If a partition's backlog is growing, latency is dominated by time spent waiting in the queue, not processing time - see [Throughput scales with partition count](#throughput-scales-with-partition-count-not-with-pipeline-count) above.
 - **Simplify hot processor stages.** `processor_latency_ns` is reported per processor, so if one bloblang mapping stage is unusually expensive, it'll show up as its own series rather than being hidden inside an aggregate pipeline latency number.
 
@@ -326,7 +330,7 @@ In `pipelines/processor.yaml`:
 In `pipelines/analytics.yaml`:
 ```yaml
 output:
-  kafka:
+  redpanda:
     batching:
       count: 100      # batch size
       period: "30s"   # time window

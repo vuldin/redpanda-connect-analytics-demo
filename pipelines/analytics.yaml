@@ -2,14 +2,14 @@
 # Reads from user-events-enriched, produces batched analytics
 
 input:
-  kafka:
-    addresses:
+  redpanda:
+    seed_brokers:
       - redpanda:9092
     topics:
       - user-events-enriched
     consumer_group: analytics-group
     auto_replay_nacks: true
-    start_from_oldest: false
+    start_offset: latest
 
 pipeline:
   processors:
@@ -19,11 +19,12 @@ pipeline:
         meta user_tier = this.user_tier
 
 output:
-  kafka:
-    addresses:
+  redpanda:
+    seed_brokers:
       - redpanda:9092
     topic: user-analytics
     key: ${! uuid_v4() }
+    partitioner: round_robin
     compression: snappy
     batching:
       count: 50

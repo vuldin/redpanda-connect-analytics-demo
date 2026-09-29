@@ -2,14 +2,14 @@
 # Reads from user-events-raw, enriches/processes data, writes to enriched topics
 
 input:
-  kafka:
-    addresses:
+  redpanda:
+    seed_brokers:
       - redpanda:9092
     topics:
       - user-events-raw
     consumer_group: processor-group
     auto_replay_nacks: true
-    start_from_oldest: false
+    start_offset: latest
 
 pipeline:
   processors:
@@ -104,17 +104,31 @@ pipeline:
           "pipeline_name": "user-event-enrichment"
         }
 
+    # Also emit processing_latency_ms as a real metric, not just a payload
+    # field, so it's visible in Datadog. Distinct from RPCN's own built-in
+    # processor_latency_ns (which times the mapping stages themselves, not
+    # event-generation-to-processing time). No Datadog-side config change
+    # needed - this flows through the existing openmetrics scrape of
+    # connect-processor's /metrics endpoint automatically.
+    - metric:
+        name: pipeline_latency_ns
+        type: timing
+        value: ${! this.processing_metadata.processing_latency_ms * 1000000 }
+        labels:
+          event_type: ${! this.event_type }
+
     # Set Kafka key for output partitioning
     - mapping: |
         meta kafka_key = this.user_id
         meta event_type = this.event_type
 
 output:
-  kafka:
-    addresses:
+  redpanda:
+    seed_brokers:
       - redpanda:9092
     topic: user-events-enriched
     key: ${! meta("kafka_key") }
+    partitioner: murmur2_hash
     compression: snappy
 
 metrics:

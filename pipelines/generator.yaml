@@ -65,11 +65,12 @@ pipeline:
         meta event_type = this.event_type
 
 output:
-  kafka:
-    addresses:
+  redpanda:
+    seed_brokers:
       - redpanda:9092
     topic: user-events-raw
     key: ${! meta("kafka_key") }
+    partitioner: murmur2_hash
     compression: snappy
 
 metrics:
