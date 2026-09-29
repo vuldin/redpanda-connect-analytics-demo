@@ -100,10 +100,14 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
-  # Datadog Agent - scrapes Redpanda + Redpanda Connect Prometheus/OpenMetrics
-  # endpoints directly. Only starts with `--profile datadog`.
+  # Datadog Agent - scrapes Redpanda (via the official redpanda check) and
+  # Redpanda Connect (via the generic OpenMetrics check) directly. Only
+  # starts with `--profile datadog`. Built from datadog/Dockerfile (not the
+  # stock image) because the official Redpanda check has to be baked into
+  # the image - it can't be installed into a running container.
   datadog-agent:
-    image: gcr.io/datadoghq/agent:7
+    build:
+      context: ./datadog
     container_name: datadog-agent
     profiles:
       - datadog

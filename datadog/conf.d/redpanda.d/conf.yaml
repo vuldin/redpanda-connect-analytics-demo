@@ -1,0 +1,12 @@
+# Official "redpanda" check config (datadog-redpanda, installed via
+# datadog/Dockerfile). Namespace ("redpanda") and the default metric set
+# are hardcoded in the check itself - see metrics.py in the integration -
+# so this only needs the endpoint. Uncomment metric_groups below to pull in
+# optional groups the check doesn't collect by default.
+instances:
+  - openmetrics_endpoint: http://redpanda:9644/public_metrics
+    use_openmetrics: true
+    # metric_groups:
+    #   - redpanda.controller
+    #   - redpanda.node_status
+    #   - redpanda.scheduler

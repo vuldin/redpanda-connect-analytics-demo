@@ -1,8 +1,12 @@
-# Datadog Agent OpenMetrics check config.
+# Datadog Agent generic OpenMetrics check config, for Redpanda Connect only.
 #
-# Both Redpanda and Redpanda Connect expose Prometheus-format metrics
-# natively (no Prometheus server required in between) - the Datadog Agent's
-# OpenMetrics check can scrape them directly.
+# The Redpanda broker itself is scraped by the dedicated redpanda.d check
+# instead (see datadog/conf.d/redpanda.d/conf.yaml + datadog/Dockerfile) -
+# that's the official integration, whose metric names (e.g.
+# redpanda.cluster.brokers) are what the "Redpanda Overview" out-of-the-box
+# dashboard expects. There's no equivalent official check for Redpanda
+# Connect, so RPCN's Prometheus-format /metrics endpoints are still scraped
+# here directly - no Prometheus server needed in between.
 #
 # One instance per scrape target. This demo runs each Redpanda Connect
 # pipeline as its own container ("standard" mode), so each one has its own
@@ -10,16 +14,6 @@
 # execution mode" section in the README for how this changes if you run the
 # same pipelines in `streams` mode instead.
 instances:
-  # Redpanda broker admin API. `/public_metrics` is the curated, lower-
-  # cardinality metrics set intended for external monitoring tools (as
-  # opposed to `/metrics`, which includes internal/high-cardinality series).
-  - openmetrics_endpoint: http://redpanda:9644/public_metrics
-    namespace: redpanda
-    metrics:
-      - ".*"
-    tags:
-      - "service:redpanda-broker"
-
   - openmetrics_endpoint: http://connect-generator:4195/metrics
     namespace: rpcn
     metrics:

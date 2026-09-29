@@ -174,25 +174,27 @@ Redpanda Connect only has one metrics endpoint (`/metrics` on its HTTP server, p
 
 ### Datadog integration
 
-The Datadog Agent's OpenMetrics check can scrape Redpanda's and Redpanda Connect's Prometheus-format endpoints directly - no separate Prometheus/Grafana stack needed in between.
+Redpanda's and Redpanda Connect's endpoints are both Prometheus-format already, so the Datadog Agent can scrape them directly - no separate Prometheus/Grafana stack needed in between. Two different checks are involved, because only Redpanda has an official one:
+
+- **`redpanda`** - the official community integration ([`datadog-redpanda`](https://github.com/DataDog/integrations-extras/tree/master/redpanda)), which scrapes the broker's `/public_metrics` and reports under clean names like `redpanda.cluster.brokers`. This is what Datadog's out-of-the-box "Redpanda Overview" dashboard queries. It isn't in the stock Agent image, so `datadog-agent` here is built from `datadog/Dockerfile`, which installs it.
+- **`openmetrics`** - the generic check, used for Redpanda Connect (`rpcn.*`), since there's no official Connect integration.
 
 ```bash
 export DD_API_KEY=<your Datadog API key>
 export DD_SITE=datadoghq.com   # or datadoghq.eu, us3.datadoghq.com, etc.
-docker compose --profile datadog up -d
+docker compose --profile datadog up -d --build
 ```
 
-This starts a `datadog-agent` container configured (see `datadog/conf.d/openmetrics.d/conf.yaml`) to scrape:
-- The broker's `/public_metrics` endpoint, under the `redpanda.*` namespace
-- Each Connect pipeline's `/metrics` endpoint, under the `rpcn.*` namespace, tagged by which pipeline it came from (`rpcn_pipeline:generator|processor|analytics`)
+`--build` matters here specifically because of the custom image - without it, Compose won't pick up changes to `datadog/Dockerfile` after the first build.
 
-Verify the checks are running and pulling samples:
+Verify both checks are running and pulling samples:
 
 ```bash
+docker exec datadog-agent agent status | grep -A8 "redpanda ("
 docker exec datadog-agent agent status | grep -A8 "openmetrics ("
 ```
 
-In Datadog, search Metrics Explorer for `redpanda.*` and `rpcn.*`.
+In Datadog, search Metrics Explorer for `redpanda.*` and `rpcn.*`, or open the built-in **Redpanda Overview** dashboard (Dashboards → search "Redpanda") to see it populated.
 
 ### Metrics and execution mode
 
@@ -231,7 +233,7 @@ docker exec redpanda rpk group describe analytics-group
 | Connect Generator | `redpandadata/connect:4.75.1` | Produces synthetic events |
 | Connect Processor | `redpandadata/connect:4.75.1` | Enriches and transforms events |
 | Connect Analytics | `redpandadata/connect:4.75.1` | Aggregates into time windows |
-| Datadog Agent (optional) | `gcr.io/datadoghq/agent:7` | Scrapes Redpanda + Connect metrics; only starts with `--profile datadog` |
+| Datadog Agent (optional) | Built from `datadog/Dockerfile` (base: `gcr.io/datadoghq/agent:7`) | Scrapes Redpanda (official check) + Connect (generic check) metrics; only starts with `--profile datadog` |
 
 ### Topics
 
