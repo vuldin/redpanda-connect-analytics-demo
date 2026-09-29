@@ -1,12 +1,12 @@
 # Real-time user event analytics with Redpanda + Redpanda Connect
 
-A clickstream analytics pipeline that takes raw user events, enriches them, and aggregates the results. Everything runs as YAML config on Redpanda Connect. No application code.
+A clickstream analytics pipeline that takes raw user events, enriches them, and aggregates the results. Everything runs as YAML config on Redpanda Connect.
 
 ## Quick start
 
 ```bash
 git clone <repository-url>
-cd rpcn-demo
+cd redpanda-connect-analytics-demo
 docker compose up -d
 docker exec redpanda rpk cluster health
 docker exec redpanda rpk topic list
@@ -17,28 +17,25 @@ Redpanda Console: [http://localhost:8080](http://localhost:8080)
 
 ## What this is for
 
-If you're building product analytics, you've dealt with this: raw clickstream data (page views, clicks, purchases) arrives fast and messy. Nobody can use it until it's been classified, scored, and aggregated. Batch ETL adds hours of delay. Writing custom stream processors means dealing with serialization, retries, scaling, and all the plumbing that has nothing to do with your actual business logic.
-
-This demo takes a different approach. Three YAML files define the entire pipeline. Redpanda stores and moves the events. Redpanda Connect does the processing. No JVM, no custom code.
+This project is meant as an example showing how to use Redpanda and Redpanda Connect, and how various other tools can be configured to work well with Redpanda.
+The analytics demo is primarily a way to drive data through the tools, so don't feel the need to focus too much on exactly what the pipelines are doing if it isn't related to your use case. Instead just focus on the fact that there are three YAML files that define the entire pipeline. Redpanda stores and moves the events while Redpanda Connect does the processing.
 
 ## What the pipeline does
 
-A product analytics platform might ingest millions of events per day. Before any of that is useful for dashboards or cohort analysis, you need to answer some questions about each event: What tier is this user? How engaged are they? What region are they in? Should this event be flagged?
+A product analytics platform might ingest millions of events per day. Before any of that is useful for dashboards or cohort analysis, you need to answer some questions about each event: What tier is this user? How engaged are they? What region are they in? Should this event be flagged? This pipeline answers those in real time across three stages.
 
-This pipeline answers those in real time across three stages.
+The generator produces synthetic clickstream at 10 events/sec, and this data includes page views, purchases, signups, with device type, browser, country, and session IDs. It simulates what an SDK or collector would send in production. Events go into `user-events-raw`.
 
-The generator produces synthetic clickstream at 10 events/sec: page views, purchases, signups, with device type, browser, country, and session IDs. It simulates what an SDK or collector would send in production. Events go into `user-events-raw`.
-
-The processor reads raw events and adds:
+The processor reads the raw events and adds:
 - A user tier (vip/premium/standard/free) derived from user ID
 - An engagement score weighted by event type and tier
 - A geographic region mapped from the country code
 - A high-value flag for large purchases, signups, and VIP cart activity
 - Processing metadata with latency tracking
 
-Output goes to `user-events-enriched`.
+The processor's output goes to the `user-events-enriched` topic.
 
-The aggregator batches enriched events in 10-second windows and writes summaries to `user-analytics`.
+The aggregator then batches those enriched events into 10-second windows and writes summaries to `user-analytics`.
 
 ### Architecture
 
@@ -132,7 +129,7 @@ Aggregates are produced every 10 seconds.
 ### Send a test event
 
 ```bash
-docker exec -it redpanda bash -c '
+docker exec redpanda bash -c '
 echo "{\"event_id\": \"test-001\", \"user_id\": \"user_1234\", \"event_type\": \"purchase\", \"timestamp\": '$(date +%s)'000, \"session_id\": \"session_test\", \"properties\": {\"page_path\": \"/checkout\", \"device_type\": \"desktop\", \"browser\": \"chrome\", \"country\": \"US\", \"duration_ms\": 5000, \"order_id\": \"order_999\", \"amount\": 199.99, \"currency\": \"USD\"}}" | rpk topic produce user-events-raw
 '
 ```
@@ -142,16 +139,16 @@ echo "{\"event_id\": \"test-001\", \"user_id\": \"user_1234\", \"event_type\": \
 ### Pipeline health
 
 ```bash
-docker exec connect-generator wget -qO- http://localhost:4195/benthos/ready
-docker exec connect-processor wget -qO- http://localhost:4195/benthos/ready
-docker exec connect-analytics wget -qO- http://localhost:4195/benthos/ready
+docker compose exec connect-generator wget -qO- http://localhost:4195/benthos/ready
+docker compose exec connect-processor wget -qO- http://localhost:4195/benthos/ready
+docker compose exec connect-analytics wget -qO- http://localhost:4195/benthos/ready
 ```
 
 ### Prometheus metrics
 
 ```bash
-docker exec connect-generator wget -qO- http://localhost:4195/metrics
-docker exec connect-processor wget -qO- http://localhost:4195/metrics
+docker compose exec connect-generator wget -qO- http://localhost:4195/metrics
+docker compose exec connect-processor wget -qO- http://localhost:4195/metrics
 ```
 
 ### Redpanda's two metrics endpoints
@@ -209,9 +206,9 @@ Which mode you run changes your scrape topology (one target vs. many) more than 
 ### Logs
 
 ```bash
-docker logs -f connect-generator
-docker logs -f connect-processor
-docker logs -f connect-analytics
+docker compose logs -f connect-generator
+docker compose logs -f connect-processor
+docker compose logs -f connect-analytics
 ```
 
 ### Consumer groups
@@ -343,15 +340,21 @@ docker compose run --rm topic-setup
 ### Pipeline stuck
 
 ```bash
-docker logs connect-processor
+docker compose logs connect-processor
 docker compose restart connect-processor
 ```
 
 ### Reset consumer offsets
 
+Kafka refuses to seek a group's offsets while it still has active members (`INVALID_OPERATION: seeking a non-empty group is not allowed`), so stop the pipeline first:
+
 ```bash
+docker compose stop connect-processor connect-analytics
+
 docker exec redpanda rpk group seek processor-group --to end
 docker exec redpanda rpk group seek analytics-group --to end
+
+docker compose start connect-processor connect-analytics
 ```
 
 ### Port conflicts
@@ -367,6 +370,10 @@ ports:
 ```bash
 # Stop and remove containers
 docker compose down
+
+# If you also started the Datadog Agent (--profile datadog), include the
+# profile flag here too, or datadog-agent is left running and orphaned:
+docker compose --profile datadog down
 
 # Also remove data volumes
 docker compose down -v

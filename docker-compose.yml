@@ -68,9 +68,11 @@ services:
     restart: "no"
 
   # Redpanda Connect - Data Generator Pipeline
+  # No container_name: these are the services meant to be scaled with
+  # `docker compose up -d --scale <service>=N` (see README), and a fixed
+  # container_name prevents Compose from running more than one replica.
   connect-generator:
     image: docker.redpanda.com/redpandadata/connect:4.75.1
-    container_name: connect-generator
     volumes:
       - ./pipelines/generator.yaml:/connect.yaml:ro
     depends_on:
@@ -81,7 +83,6 @@ services:
   # Redpanda Connect - Data Processor Pipeline
   connect-processor:
     image: docker.redpanda.com/redpandadata/connect:4.75.1
-    container_name: connect-processor
     volumes:
       - ./pipelines/processor.yaml:/connect.yaml:ro
     depends_on:
@@ -92,7 +93,6 @@ services:
   # Redpanda Connect - Analytics Aggregator Pipeline
   connect-analytics:
     image: docker.redpanda.com/redpandadata/connect:4.75.1
-    container_name: connect-analytics
     volumes:
       - ./pipelines/analytics.yaml:/connect.yaml:ro
     depends_on:
